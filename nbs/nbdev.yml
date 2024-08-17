@@ -1,0 +1,9 @@
+project:
+  output-dir: _docs
+
+website:
+  title: "rapidai"
+  site-url: "https://m-gopichand.github.io/rapidai"
+  description: "wrapper library on top of PyTorch"
+  repo-branch: main
+  repo-url: "https://github.com/m-gopichand/rapidai"
