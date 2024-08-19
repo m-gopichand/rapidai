@@ -1,0 +1,35 @@
+package:
+  name: rapidai
+  version: 0.0.2
+source:
+  sha256: 8d4eb70a6fe732c6c8d9b11932ab3b78f33fd8191767401d7bcebb4435e34985
+  url: https://files.pythonhosted.org/packages/e9/e1/f6861af43e643179f77a212d794b342a987f29c438b5896c474de479c308/rapidai-0.0.2.tar.gz
+about:
+  description: '# rapidai
+
+    RAPID AI wrapper library on top of PyTorch,  enabling seamless training workflows.
+
+    '
+  dev_url: https://github.com/m-gopichand/rapidai
+  doc_url: https://m-gopichand.github.io/rapidai
+  home: https://github.com/m-gopichand/rapidai
+  license: Apache Software
+  license_family: APACHE
+  summary: wrapper library on top of PyTorch
+build:
+  noarch: python
+  number: '0'
+  script: '{{ PYTHON }} -m pip install . -vv'
+extra:
+  recipe-maintainers:
+  - m-gopichand
+requirements:
+  host:
+  - packaging
+  - python >=3.7
+  run:
+  - packaging
+  - python >=3.7
+test:
+  imports:
+  - rapidai
