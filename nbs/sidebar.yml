@@ -12,7 +12,3 @@ website:
       - 07_accel_sgd.ipynb
       - 08_resnet.ipynb
       - 09_augment.ipynb
-      - 10_DDPM_v2.ipynb
-      - 11_fid.ipynb
-      - 12_diffusion-attn-cond.ipynb
-      - consistency.ipynb
