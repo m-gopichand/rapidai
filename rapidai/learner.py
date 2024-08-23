@@ -3,7 +3,8 @@
 # %% auto 0
 __all__ = ['CancelFitException', 'CancelBatchException', 'CancelEpochException', 'Callback', 'run_cbs', 'SingleBatchCB', 'to_cpu',
            'MetricsCB', 'DeviceCB', 'TrainCB', 'ProgressCB', 'with_cbs', 'Learner', 'TrainLearner', 'MomentumLearner',
-           'LRFinderCB', 'lr_find', 'WandbCallback', 'MLflowCallback']
+           'LRFinderCB', 'lr_find', 'WandbCB', 'MLflowCB', 'EarlyStoppingCB', 'TensorBoardCB', 'ReduceLROnPlateauCB',
+           'ModelCheckpointCB']
 
 # %% ../nbs/04_learner.ipynb 1
 import math,torch,matplotlib.pyplot as plt
@@ -20,6 +21,7 @@ from torch import optim
 import torch.nn.functional as F
 from .conv import *
 from fastprogress import progress_bar,master_bar
+from torch.utils.tensorboard import SummaryWriter
 
 # %% ../nbs/04_learner.ipynb 14
 class CancelFitException(Exception): pass
@@ -239,7 +241,7 @@ def lr_find(self:Learner, gamma=1.3, max_mult=3, start_lr=1e-5, max_epochs=10):
     self.fit(max_epochs, lr=start_lr, cbs=LRFinderCB(gamma=gamma, max_mult=max_mult))
 
 # %% ../nbs/04_learner.ipynb 65
-class WandbCallback(Callback):
+class WandbCB(Callback):
     def __init__(
         self,
         project_name: str,
@@ -343,7 +345,7 @@ class WandbCallback(Callback):
 
 
 
-class MLflowCallback(Callback):
+class MLflowCB(Callback):
     def __init__(
         self,
         experiment_name: str,
@@ -435,3 +437,93 @@ class MLflowCallback(Callback):
     def after_fit(self, learn):
         # Finish MLflow run
         mlflow.end_run()
+
+
+
+class EarlyStoppingCB(Callback):
+    def __init__(self, monitor='val_loss', min_delta=0, patience=3, mode='min'):
+        fc.store_attr()
+        self.best = None
+        self.num_bad_epochs = 0
+        self.operator = torch.lt if mode == 'min' else torch.gt
+
+    def after_epoch(self, learn):
+        current = learn.metrics.metrics[self.monitor].compute().item()
+        if self.best is None or self.operator(current, self.best - self.min_delta):
+            self.best = current
+            self.num_bad_epochs = 0
+        else:
+            self.num_bad_epochs += 1
+            if self.num_bad_epochs >= self.patience:
+                print("Stopping early!")
+                raise CancelFitException()
+
+
+class TensorBoardCB(Callback):
+    def __init__(self, log_dir='./runs', log_graph=True):
+        self.writer = SummaryWriter(log_dir=log_dir)
+        self.log_graph = log_graph
+
+    def before_fit(self, learn):
+        if self.log_graph:
+            dummy_input = next(iter(learn.dls.train))[0].to(learn.model.device)
+            self.writer.add_graph(learn.model, dummy_input)
+
+    def after_batch(self, learn):
+        if learn.training:
+            self.writer.add_scalar('Loss/train', learn.loss.item(), learn.iter_total)
+        else:
+            self.writer.add_scalar('Loss/val', learn.loss.item(), learn.iter_total)
+
+    def after_epoch(self, learn):
+        for name, metric in learn.metrics.metrics.items():
+            self.writer.add_scalar(f'Metrics/{name}', metric.compute().item(), learn.epoch)
+
+    def after_fit(self, learn):
+        self.writer.close()
+
+
+class ReduceLROnPlateauCB(Callback):
+    def __init__(self, monitor='val_loss', patience=3, factor=0.1, min_lr=1e-6, mode='min'):
+        self.monitor, self.patience, self.factor, self.min_lr, self.mode = monitor, patience, factor, min_lr, mode
+        self.best = None
+        self.counter = 0
+
+    def before_fit(self, learn):
+        self.best = float('inf') if self.mode == 'min' else -float('inf')
+
+    def after_epoch(self, learn):
+        current = learn.metrics.all_metrics[self.monitor].compute().item()
+        if (self.mode == 'min' and current < self.best) or \
+           (self.mode == 'max' and current > self.best):
+            self.best = current
+            self.counter = 0
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                new_lr = max(learn.opt.param_groups[0]['lr'] * self.factor, self.min_lr)
+                for g in learn.opt.param_groups:
+                    g['lr'] = new_lr
+                self.counter = 0
+                print(f"Learning rate reduced to {new_lr:.1e}")
+
+
+
+class ModelCheckpointCB(Callback):
+    def __init__(self, monitor='val_loss', mode='min', save_best_only=True, filepath='./best_model.pth'):
+        self.monitor, self.mode, self.save_best_only, self.filepath = monitor, mode, save_best_only, filepath
+        self.best = None
+
+    def before_fit(self, learn):
+        self.best = float('inf') if self.mode == 'min' else -float('inf')
+
+    def after_epoch(self, learn):
+        current = learn.metrics.all_metrics[self.monitor].compute().item()
+        if (self.mode == 'min' and current < self.best) or \
+           (self.mode == 'max' and current > self.best):
+            self.best = current
+            torch.save(learn.model.state_dict(), self.filepath)
+            print(f"Saved model checkpoint to {self.filepath}")
+
+
+
