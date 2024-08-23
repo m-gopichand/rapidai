@@ -23,7 +23,8 @@ def conv(ni, nf, ks=3, stride=2, act=True):
 def_device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def device():
-    return 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
+    return 'Accelerator: Apple-GPU' if torch.backends.mps.is_available() else 'Accelerator: GPU' if torch.cuda.is_available() else 'No accelerator found using cpu'
+ 
  
 def to_device(x, device=def_device):
     if isinstance(x, torch.Tensor): return x.to(device)

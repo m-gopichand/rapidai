@@ -3,7 +3,7 @@
 # %% auto 0
 __all__ = ['CancelFitException', 'CancelBatchException', 'CancelEpochException', 'Callback', 'run_cbs', 'SingleBatchCB', 'to_cpu',
            'MetricsCB', 'DeviceCB', 'TrainCB', 'ProgressCB', 'with_cbs', 'Learner', 'TrainLearner', 'MomentumLearner',
-           'LRFinderCB', 'lr_find']
+           'LRFinderCB', 'lr_find', 'WandbCallback', 'MLflowCallback']
 
 # %% ../nbs/04_learner.ipynb 1
 import math,torch,matplotlib.pyplot as plt
@@ -12,6 +12,8 @@ from collections.abc import Mapping
 from operator import attrgetter
 from functools import partial
 from copy import copy
+import wandb
+import mlflow
 
 from torch import optim
 import torch.nn.functional as F
@@ -134,7 +136,7 @@ class with_cbs:
 
 # %% ../nbs/04_learner.ipynb 49
 class Learner():
-    def __init__(self, model, dls=(0,), loss_func=F.mse_loss, lr=0.1, cbs=None, opt_func=optim.SGD):
+    def __init__(self, model, dls=(0,), loss_func=F.mse_loss, lr=0.1, cbs=None, opt_func=optim.Adam):
         cbs = fc.L(cbs)
         fc.store_attr()
 
@@ -236,3 +238,55 @@ class LRFinderCB(Callback):
 @fc.patch
 def lr_find(self:Learner, gamma=1.3, max_mult=3, start_lr=1e-5, max_epochs=10):
     self.fit(max_epochs, lr=start_lr, cbs=LRFinderCB(gamma=gamma, max_mult=max_mult))
+
+# %% ../nbs/04_learner.ipynb 65
+class WandbCallback(Callback):
+    def __init__(self, project_name, run_name=None, config=None):
+        self.project_name = project_name
+        self.run_name = run_name
+        self.config = config
+
+    def before_fit(self, learn):
+        wandb.init(project=self.project_name, name=self.run_name, config=self.config)
+        learn.wandb_run = wandb.run
+
+    def after_batch(self, learn):
+        wandb.log({"train/loss": learn.loss.item(), "train/epoch": learn.epoch, "train/iter": learn.iter})
+
+    def after_epoch(self, learn):
+        metrics = {f"train/{k}": v.compute().item() for k, v in learn.metrics.metrics.items()}
+        metrics.update({f"val/{k}": v.compute().item() for k, v in learn.metrics.metrics.items()})
+        wandb.log(metrics)
+
+    def after_fit(self, learn):
+        wandb.finish()
+
+
+
+class MLflowCallback(Callback):
+    def __init__(self, experiment_name=None, run_name=None, tracking_uri=None, config=None):
+        self.experiment_name = experiment_name
+        self.run_name = run_name
+        self.tracking_uri = tracking_uri
+        self.config = config
+
+    def before_fit(self, learn):
+        if self.tracking_uri:
+            mlflow.set_tracking_uri(self.tracking_uri)
+        if self.experiment_name:
+            mlflow.set_experiment(self.experiment_name)
+        self.run = mlflow.start_run(run_name=self.run_name)
+        if self.config:
+            mlflow.log_params(self.config)
+
+    def after_batch(self, learn):
+        mlflow.log_metric("train/loss", learn.loss.item(), step=learn.iter)
+
+    def after_epoch(self, learn):
+        metrics = {f"train/{k}": v.compute().item() for k, v in learn.metrics.metrics.items()}
+        mlflow.log_metrics(metrics, step=learn.epoch)
+
+    def after_fit(self, learn):
+        mlflow.end_run()
+
+
