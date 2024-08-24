@@ -3,8 +3,7 @@
 # %% auto 0
 __all__ = ['CancelFitException', 'CancelBatchException', 'CancelEpochException', 'Callback', 'run_cbs', 'SingleBatchCB', 'to_cpu',
            'MetricsCB', 'DeviceCB', 'TrainCB', 'ProgressCB', 'with_cbs', 'Learner', 'TrainLearner', 'MomentumLearner',
-           'LRFinderCB', 'lr_find', 'WandbCB', 'MLflowCB', 'EarlyStoppingCB', 'TensorBoardCB', 'ReduceLROnPlateauCB',
-           'ModelCheckpointCB']
+           'LRFinderCB', 'lr_find', 'WandbCallback', 'EarlyStoppingCallback']
 
 # %% ../nbs/04_learner.ipynb 1
 import math,torch,matplotlib.pyplot as plt
@@ -241,289 +240,58 @@ def lr_find(self:Learner, gamma=1.3, max_mult=3, start_lr=1e-5, max_epochs=10):
     self.fit(max_epochs, lr=start_lr, cbs=LRFinderCB(gamma=gamma, max_mult=max_mult))
 
 # %% ../nbs/04_learner.ipynb 65
-class WandbCB(Callback):
-    def __init__(
-        self,
-        project_name: str,
-        run_name: str = None,
-        config: dict = None,
-        log_model: bool = True,
-        log_frequency: int = 100,
-        save_best_model: bool = True,
-        monitor: str = 'val_loss',
-        mode: str = 'min',
-        save_model_checkpoint: bool = True,
-        checkpoint_dir: str = './models',
-        log_gradients: bool = False,
-        log_preds: bool = False,
-        preds_frequency: int = 500,
-    ):
-        """
-        Initializes the WandbCallback.
-
-        Args:
-            project_name (str): Name of the W&B project.
-            run_name (str, optional): Name of the W&B run. Defaults to None.
-            config (dict, optional): Hyperparameters and configurations. Defaults to None.
-            log_model (bool, optional): Log model architecture to W&B. Defaults to True.
-            log_frequency (int, optional): Frequency (in steps) to log training metrics. Defaults to 100.
-            save_best_model (bool, optional): Save the best model during training. Defaults to True.
-            monitor (str, optional): Metric to monitor for best model saving. Defaults to 'val_loss'.
-            mode (str, optional): 'min' or 'max' to minimize or maximize the monitored metric. Defaults to 'min'.
-            save_model_checkpoint (bool, optional): Save model checkpoint after each epoch. Defaults to True.
-            checkpoint_dir (str, optional): Directory to save model checkpoints. Defaults to './models'.
-            log_gradients (bool, optional): Log gradients histograms. Defaults to False.
-            log_preds (bool, optional): Log model predictions. Defaults to False.
-            preds_frequency (int, optional): Frequency (in steps) to log predictions. Defaults to 500.
-        """
-        fc.store_attr()
-
+class WandbCallback(Callback):
+    order = MetricsCB.order+1
+    def __init__(self, project_name, name=None):
+        self.project_name = project_name
+        self.entity = name
+        self.best_loss = float('inf')
+        self.best_model_state = None
+    
     def before_fit(self, learn):
-        # Initialize W&B run
-        self.run = wandb.init(project=self.project_name, name=self.run_name, config=self.config)
-        self.best_metric = None
-        self.operator = torch.lt if self.mode == 'min' else torch.gt
-        self.checkpoint_path = Path(self.checkpoint_dir)
-        self.checkpoint_path.mkdir(parents=True, exist_ok=True)
+        wandb.init(project=self.project_name, entity=self.entity)
+        wandb.config.update({
+            'learning_rate': learn.lr,
+            'epochs': learn.n_epochs,
+            'batch_size': len(learn.dls.train.batch_size)
+        })
+    
+    def after_epoch(self, learn):
+        metrics = {k: v.compute() for k, v in learn.metrics.all_metrics.items()}
+        metrics['epoch'] = learn.epoch
+        metrics['train'] = 'train' if learn.model.training else 'valid'
+        wandb.log(metrics)
         
-        if self.log_model:
-            # Log model architecture
-            wandb.watch(learn.model, log='all' if self.log_gradients else 'parameters')
+        # Save the best model based on loss
+        current_loss = learn.metrics.all_metrics['loss'].compute()
+        if learn.model.training and current_loss < self.best_loss:
+            self.best_loss = current_loss
+            self.best_model_state = learn.model.state_dict()
+            wandb.save('model.pth')  # Save model to wandb
+    
+    def after_fit(self, learn):
+        if self.best_model_state is not None:
+            torch.save(self.best_model_state, 'best_model.pth')
+            wandb.save('best_model.pth')
 
-    def after_batch(self, learn):
-        if learn.training and (learn.iter % self.log_frequency == 0):
-            metrics = {
-                'train/loss': learn.loss.item(),
-                'train/epoch': learn.epoch + (learn.iter / len(learn.dl))
-            }
-            # Log metrics to W&B
-            wandb.log(metrics, step=learn.iter_total)
+
+class EarlyStoppingCallback(Callback):
+    order = MetricsCB.order+1
+    def __init__(self, patience=3, min_delta=0.001):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_loss = float('inf')
+        self.wait = 0
+    
+    def after_epoch(self, learn):
+        if not learn.model.training:
+            current_loss = learn.metrics.all_metrics['loss'].compute()
+            if current_loss < self.best_loss - self.min_delta:
+                self.best_loss = current_loss
+                self.wait = 0
+            else:
+                self.wait += 1
             
-            if self.log_gradients:
-                # Log gradients
-                for name, param in learn.model.named_parameters():
-                    if param.grad is not None:
-                        wandb.log({f'gradients/{name}': wandb.Histogram(param.grad.cpu().numpy())}, step=learn.iter_total)
-            
-            if self.log_preds and (learn.iter % self.preds_frequency == 0):
-                # Log predictions (assuming classification task)
-                inputs, targets = learn.batch[:2]
-                preds = torch.argmax(learn.preds, dim=1)
-                table = wandb.Table(columns=["input", "prediction", "target"])
-                for inp, pred, target in zip(inputs.cpu(), preds.cpu(), targets.cpu()):
-                    table.add_data(wandb.Image(inp), pred.item(), target.item())
-                wandb.log({"predictions": table}, step=learn.iter_total)
-
-    def after_epoch(self, learn):
-        # Compute validation metrics
-        val_metrics = {f'val/{k}': v.compute().item() for k, v in learn.metrics.metrics.items()}
-        val_metrics['val/loss'] = learn.metrics.loss.compute().item()
-        val_metrics['epoch'] = learn.epoch
-        # Log validation metrics
-        wandb.log(val_metrics, step=learn.iter_total)
-        
-        # Save model checkpoint
-        if self.save_model_checkpoint:
-            epoch_checkpoint_path = self.checkpoint_path / f'model_epoch_{learn.epoch}.pth'
-            torch.save(learn.model.state_dict(), epoch_checkpoint_path)
-            wandb.save(str(epoch_checkpoint_path))
-        
-        # Save best model
-        current_metric = val_metrics.get(f'val/{self.monitor}', val_metrics.get('val/loss'))
-        if self.save_best_model and current_metric is not None:
-            if self.best_metric is None or self.operator(current_metric, self.best_metric):
-                self.best_metric = current_metric
-                best_checkpoint_path = self.checkpoint_path / 'best_model.pth'
-                torch.save(learn.model.state_dict(), best_checkpoint_path)
-                wandb.save(str(best_checkpoint_path))
-                wandb.run.summary[f'best_{self.monitor}'] = self.best_metric
-
-    def after_fit(self, learn):
-        # Finish W&B run
-        wandb.finish()
-
-
-
-
-class MLflowCB(Callback):
-    def __init__(
-        self,
-        experiment_name: str,
-        run_name: str = None,
-        tracking_uri: str = None,
-        config: dict = None,
-        log_model: bool = True,
-        log_frequency: int = 100,
-        save_best_model: bool = True,
-        monitor: str = 'val_loss',
-        mode: str = 'min',
-        save_model_checkpoint: bool = True,
-        checkpoint_dir: str = './models',
-    ):
-        """
-        Initializes the MLflowCallback.
-
-        Args:
-            experiment_name (str): Name of the MLflow experiment.
-            run_name (str, optional): Name of the MLflow run. Defaults to None.
-            tracking_uri (str, optional): URI of the tracking server. Defaults to None (local server).
-            config (dict, optional): Hyperparameters and configurations. Defaults to None.
-            log_model (bool, optional): Log model architecture to MLflow. Defaults to True.
-            log_frequency (int, optional): Frequency (in steps) to log training metrics. Defaults to 100.
-            save_best_model (bool, optional): Save the best model during training. Defaults to True.
-            monitor (str, optional): Metric to monitor for best model saving. Defaults to 'val_loss'.
-            mode (str, optional): 'min' or 'max' to minimize or maximize the monitored metric. Defaults to 'min'.
-            save_model_checkpoint (bool, optional): Save model checkpoint after each epoch. Defaults to True.
-            checkpoint_dir (str, optional): Directory to save model checkpoints. Defaults to './models'.
-        """
-        fc.store_attr()
-
-    def before_fit(self, learn):
-        # Set MLflow tracking URI if provided
-        if self.tracking_uri:
-            mlflow.set_tracking_uri(self.tracking_uri)
-        
-        # Set experiment and run
-        mlflow.set_experiment(self.experiment_name)
-        self.run = mlflow.start_run(run_name=self.run_name)
-        
-        # Log configuration parameters
-        if self.config:
-            mlflow.log_params(self.config)
-        
-        # Prepare for saving checkpoints
-        self.best_metric = None
-        self.operator = torch.lt if self.mode == 'min' else torch.gt
-        self.checkpoint_path = Path(self.checkpoint_dir)
-        self.checkpoint_path.mkdir(parents=True, exist_ok=True)
-        
-        # Log model architecture if needed
-        if self.log_model:
-            mlflow.pytorch.log_model(learn.model, "model_architecture")
-
-    def after_batch(self, learn):
-        if learn.training and (learn.iter % self.log_frequency == 0):
-            metrics = {
-                'train/loss': learn.loss.item(),
-                'train/epoch': learn.epoch + (learn.iter / len(learn.dl))
-            }
-            mlflow.log_metrics(metrics, step=learn.iter_total)
-
-    def after_epoch(self, learn):
-        # Compute validation metrics
-        val_metrics = {f'val/{k}': v.compute().item() for k, v in learn.metrics.metrics.items()}
-        val_metrics['val/loss'] = learn.metrics.loss.compute().item()
-        val_metrics['epoch'] = learn.epoch
-        
-        # Log validation metrics
-        mlflow.log_metrics(val_metrics, step=learn.iter_total)
-        
-        # Save model checkpoint
-        if self.save_model_checkpoint:
-            epoch_checkpoint_path = self.checkpoint_path / f'model_epoch_{learn.epoch}.pth'
-            torch.save(learn.model.state_dict(), epoch_checkpoint_path)
-            mlflow.log_artifact(str(epoch_checkpoint_path))
-        
-        # Save best model
-        current_metric = val_metrics.get(f'val/{self.monitor}', val_metrics.get('val/loss'))
-        if self.save_best_model and current_metric is not None:
-            if self.best_metric is None or self.operator(current_metric, self.best_metric):
-                self.best_metric = current_metric
-                best_checkpoint_path = self.checkpoint_path / 'best_model.pth'
-                torch.save(learn.model.state_dict(), best_checkpoint_path)
-                mlflow.log_artifact(str(best_checkpoint_path))
-                mlflow.log_metric(f'best_{self.monitor}', self.best_metric, step=learn.iter_total)
-
-    def after_fit(self, learn):
-        # Finish MLflow run
-        mlflow.end_run()
-
-
-
-class EarlyStoppingCB(Callback):
-    def __init__(self, monitor='val_loss', min_delta=0, patience=3, mode='min'):
-        fc.store_attr()
-        self.best = None
-        self.num_bad_epochs = 0
-        self.operator = torch.lt if mode == 'min' else torch.gt
-
-    def after_epoch(self, learn):
-        current = learn.metrics.metrics[self.monitor].compute().item()
-        if self.best is None or self.operator(current, self.best - self.min_delta):
-            self.best = current
-            self.num_bad_epochs = 0
-        else:
-            self.num_bad_epochs += 1
-            if self.num_bad_epochs >= self.patience:
-                print("Stopping early!")
-                raise CancelFitException()
-
-
-class TensorBoardCB(Callback):
-    def __init__(self, log_dir='./runs', log_graph=True):
-        self.writer = SummaryWriter(log_dir=log_dir)
-        self.log_graph = log_graph
-
-    def before_fit(self, learn):
-        if self.log_graph:
-            dummy_input = next(iter(learn.dls.train))[0].to(learn.model.device)
-            self.writer.add_graph(learn.model, dummy_input)
-
-    def after_batch(self, learn):
-        if learn.training:
-            self.writer.add_scalar('Loss/train', learn.loss.item(), learn.iter_total)
-        else:
-            self.writer.add_scalar('Loss/val', learn.loss.item(), learn.iter_total)
-
-    def after_epoch(self, learn):
-        for name, metric in learn.metrics.metrics.items():
-            self.writer.add_scalar(f'Metrics/{name}', metric.compute().item(), learn.epoch)
-
-    def after_fit(self, learn):
-        self.writer.close()
-
-
-class ReduceLROnPlateauCB(Callback):
-    def __init__(self, monitor='val_loss', patience=3, factor=0.1, min_lr=1e-6, mode='min'):
-        self.monitor, self.patience, self.factor, self.min_lr, self.mode = monitor, patience, factor, min_lr, mode
-        self.best = None
-        self.counter = 0
-
-    def before_fit(self, learn):
-        self.best = float('inf') if self.mode == 'min' else -float('inf')
-
-    def after_epoch(self, learn):
-        current = learn.metrics.all_metrics[self.monitor].compute().item()
-        if (self.mode == 'min' and current < self.best) or \
-           (self.mode == 'max' and current > self.best):
-            self.best = current
-            self.counter = 0
-        else:
-            self.counter += 1
-            if self.counter >= self.patience:
-                new_lr = max(learn.opt.param_groups[0]['lr'] * self.factor, self.min_lr)
-                for g in learn.opt.param_groups:
-                    g['lr'] = new_lr
-                self.counter = 0
-                print(f"Learning rate reduced to {new_lr:.1e}")
-
-
-
-class ModelCheckpointCB(Callback):
-    def __init__(self, monitor='val_loss', mode='min', save_best_only=True, filepath='./best_model.pth'):
-        self.monitor, self.mode, self.save_best_only, self.filepath = monitor, mode, save_best_only, filepath
-        self.best = None
-
-    def before_fit(self, learn):
-        self.best = float('inf') if self.mode == 'min' else -float('inf')
-
-    def after_epoch(self, learn):
-        current = learn.metrics.all_metrics[self.monitor].compute().item()
-        if (self.mode == 'min' and current < self.best) or \
-           (self.mode == 'max' and current > self.best):
-            self.best = current
-            torch.save(learn.model.state_dict(), self.filepath)
-            print(f"Saved model checkpoint to {self.filepath}")
-
-
-
+            if self.wait >= self.patience:
+                print("Early stopping triggered.")
+                raise CancelFitException
