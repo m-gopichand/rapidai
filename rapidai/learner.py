@@ -3,7 +3,7 @@
 # %% auto 0
 __all__ = ['CancelFitException', 'CancelBatchException', 'CancelEpochException', 'Callback', 'run_cbs', 'SingleBatchCB', 'to_cpu',
            'MetricsCB', 'DeviceCB', 'TrainCB', 'ProgressCB', 'with_cbs', 'Learner', 'TrainLearner', 'MomentumLearner',
-           'LRFinderCB', 'lr_find', 'WandbCB']
+           'LRFinderCB', 'lr_find', 'WandbCB', 'EarlyStoppingCallback']
 
 # %% ../nbs/04_learner.ipynb 1
 import math,torch,matplotlib.pyplot as plt
@@ -278,4 +278,27 @@ class WandbCB(Callback):
             torch.save(learn.model.state_dict(), self.model_name)
             wandb.save(self.model_name)
         self.run.finish()
+
+
+class EarlyStoppingCallback(Callback):
+    order = MetricsCB.order+1
+    def __init__(self, patience=3, min_delta=0.001):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_loss = float('inf')
+        self.wait = 0
+        
+    def after_epoch(self, learn):
+        if not learn.model.training:
+            current_loss = learn.metrics.all_metrics['loss'].compute()
+            if current_loss < self.best_loss - self.min_delta:
+                self.best_loss = current_loss
+                self.wait = 0
+            else:
+                self.wait += 1
+            
+            if self.wait >= self.patience:
+                print("Early stopping triggered.")
+                raise CancelFitException
+
 
