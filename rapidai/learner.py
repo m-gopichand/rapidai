@@ -3,7 +3,7 @@
 # %% auto 0
 __all__ = ['CancelFitException', 'CancelBatchException', 'CancelEpochException', 'Callback', 'run_cbs', 'SingleBatchCB', 'to_cpu',
            'MetricsCB', 'DeviceCB', 'TrainCB', 'ProgressCB', 'with_cbs', 'Learner', 'TrainLearner', 'MomentumLearner',
-           'LRFinderCB', 'lr_find', 'WandbCB', 'EarlyStoppingCallback']
+           'LRFinderCB', 'lr_find', 'WandbCB', 'EarlyStoppingCB']
 
 # %% ../nbs/04_learner.ipynb 1
 import math,torch,matplotlib.pyplot as plt
@@ -280,14 +280,14 @@ class WandbCB(Callback):
         self.run.finish()
 
 
-class EarlyStoppingCallback(Callback):
+class EarlyStoppingCB(Callback):
     order = MetricsCB.order+1
     def __init__(self, patience=3, min_delta=0.001):
         self.patience = patience
         self.min_delta = min_delta
         self.best_loss = float('inf')
         self.wait = 0
-        
+
     def after_epoch(self, learn):
         if not learn.model.training:
             current_loss = learn.metrics.all_metrics['loss'].compute()
