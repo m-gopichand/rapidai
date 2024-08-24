@@ -3,7 +3,7 @@
 # %% auto 0
 __all__ = ['CancelFitException', 'CancelBatchException', 'CancelEpochException', 'Callback', 'run_cbs', 'SingleBatchCB', 'to_cpu',
            'MetricsCB', 'DeviceCB', 'TrainCB', 'ProgressCB', 'with_cbs', 'Learner', 'TrainLearner', 'MomentumLearner',
-           'LRFinderCB', 'lr_find', 'EarlyStoppingCB', 'WandbCB']
+           'LRFinderCB', 'lr_find', 'WandbCB']
 
 # %% ../nbs/04_learner.ipynb 1
 import math,torch,matplotlib.pyplot as plt
@@ -240,59 +240,42 @@ def lr_find(self:Learner, gamma=1.3, max_mult=3, start_lr=1e-5, max_epochs=10):
     self.fit(max_epochs, lr=start_lr, cbs=LRFinderCB(gamma=gamma, max_mult=max_mult))
 
 # %% ../nbs/04_learner.ipynb 65
-class EarlyStoppingCB(Callback):
-    order = MetricsCB.order+1
-    def __init__(self, patience=3, min_delta=0.001):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.best_loss = float('inf')
-        self.wait = 0
-    
-    def after_epoch(self, learn):
-        if not learn.model.training:
-            current_loss = learn.metrics.all_metrics['loss'].compute()
-            if current_loss < self.best_loss - self.min_delta:
-                self.best_loss = current_loss
-                self.wait = 0
-            else:
-                self.wait += 1
-            
-            if self.wait >= self.patience:
-                print("Early stopping triggered.")
-                raise CancelFitException
-            
 class WandbCB(Callback):
-    order = MetricsCB.order+1
-
-    def __init__(self, project_name="default-project", run_name=None, log_model=True, model_name="best_model.pth"):
+    order = MetricsCB.order + 1
+    
+    def __init__(self, project_name="default-project", run_name=None, log_model=True, save_model=False, model_name="final_model.pth"):
         self.project_name = project_name
         self.run_name = run_name
         self.log_model = log_model
+        self.save_model = save_model
         self.model_name = model_name
-        self.best_loss = float('inf')
 
     def before_fit(self, learn):
         self.run = wandb.init(project=self.project_name, name=self.run_name)
         self.run.watch(learn.model, log="all")
 
     def after_epoch(self, learn):
-        metrics = {k: v.compute().item() if hasattr(v, 'compute') else v for k, v in learn.metrics.all_metrics.items()}
+        # Log all metrics for the epoch
+        metrics = {f'{k}_train' if learn.training else f'{k}_valid': v.compute().item() if hasattr(v, 'compute') else v 
+                   for k, v in learn.metrics.all_metrics.items()}
         metrics["epoch"] = learn.epoch
         self.run.log(metrics)
 
-        # Save the model only if it has the best validation loss so far
-        if not learn.model.training:
-            current_loss = learn.metrics.all_metrics['loss'].compute()
-            if current_loss < self.best_loss:
-                self.best_loss = current_loss
-                torch.save(learn.model.state_dict(), self.model_name)
-                wandb.save(self.model_name)
+        # Save model checkpoint if save_model is enabled
+        if self.save_model and not learn.training:
+            model_path = f"{self.model_name}_epoch_{learn.epoch}.pth"
+            torch.save(learn.model.state_dict(), model_path)
+            wandb.save(model_path)
 
     def after_fit(self, learn):
-        self.run.finish()
+        if self.log_model:
+            torch.save(learn.model.state_dict(), self.model_name)
+            wandb.log_artifact(self.model_name, type="model")
+        
 
     def cleanup_fit(self, learn):
         if self.log_model:
-            # Log the best model
-            wandb.log_artifact(self.model_name, type="model")
+            torch.save(learn.model.state_dict(), self.model_name)
+            wandb.save(self.model_name)
+        self.run.finish()
 
