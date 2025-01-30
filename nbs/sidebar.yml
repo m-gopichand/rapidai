@@ -1,0 +1,14 @@
+website:
+  sidebar:
+    contents:
+      - index.ipynb
+      - 00_core.ipynb
+      - 01_minibatch_training.ipynb
+      - 02_datasets.ipynb
+      - 03_convolutions.ipynb
+      - 04_learner.ipynb
+      - 05_activations.ipynb
+      - 06_initializing.ipynb
+      - 07_accel_sgd.ipynb
+      - 08_resnet.ipynb
+      - 09_augment.ipynb
